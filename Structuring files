@@ -1,0 +1,640 @@
+import os # Системная библиотека для указания деректив, создания папок, движение по папками
+import re
+import docx # Библиотека для работы с DOCX файлами
+import fitz # Библиотека для работы с PDF файлами
+import mammoth # Библиотека для преобразования docx(mht) в html
+import requests # библиотека для создания requests запросов (HTML)
+import pymorphy2 # Библиотека для создания леммы слова
+import unicodedata # Библиотека для нормализации текста
+import pandas as pd
+from tqdm import tqdm # Библотека для создания ProgressBar
+from glob import glob
+import urllib.request # Библиотека для чтения HTML
+from nltk import bigrams # Биграммы
+from pathlib import Path # Библиотека для получения даты файлов
+from pptx import Presentation # Библиотека для работы с PPTX файлами
+from bs4 import BeautifulSoup
+from datetime import datetime # Библиотека для получения даты файлов
+from collections import Counter # Ключевые слова по факту
+from operator import itemgetter # Библиотека используется для работы функции резюме
+import win32com.client as win32 # Библиотека для преобразования doc в doc (так же используется в mht)
+from readability import Document # Библиотека для работы с HTML файлами
+from nltk.corpus import stopwords
+from win32com.client import constants # Библиотека для mht и doc
+from requests_file import FileAdapter # Библиотека для работы с HTML файлами
+
+
+direct = str(input('Введите директорию поиска:   '))
+index1 = str(input('Введите директорию вывода данных:   '))
+
+# Модуль для коректной работы pymorphy2
+morph = pymorphy2.MorphAnalyzer()
+
+# Список для хранения названий преобразованныхх файлов
+list_for_mht_doc = []
+
+# Список для файлов с ошибкой
+errors = []
+errors_with_name = []
+errors_empty_file = []
+errors_docx = []
+
+# Создание папки, в которую будет сгружаться текст их файлов
+os.chdir(index1)
+if not os.path.isdir("текст"):
+     os.mkdir("текст")
+index = index1 + '\\текст'
+
+
+# ПЕРВАЯ ЧАСТЬ: Преобразование doc и mht файлов в архиве
+def file_conversion(inputpath):
+     """ Предварительная обработка общих размеров файлов"""
+     sizecounter = 0
+     for filepath in tqdm(walk_mht_doc(inputpath), unit="files"):
+          if filepath.endswith('.mht') or filepath.endswith('.doc'):
+               sizecounter += os.stat(filepath).st_size
+
+     # Загрузка tqdm со счетчиком размера вместо счетчика файлов
+     with tqdm(total=sizecounter,
+               unit='B', unit_scale=True, unit_divisor=1024) as progressbar_conversion:
+          for filepath in walk_mht_doc(inputpath):
+               if filepath.endswith('.mht'):  # Сценарий для mht файла
+                    try:
+                         save_as_docx(filepath)
+                    except BaseException:
+                         errors.append(filepath)
+                         progressbar_conversion.set_postfix(file=filepath, refresh=False)
+                         progressbar_conversion.update(os.stat(filepath).st_size)
+                         continue
+                    way_html = re.sub(r'\.\w+$', '.html', filepath)
+                    way_docx = re.sub(r'\.\w+$', '.docx', filepath)
+                    try:
+                        save_as_html(way_docx, way_html)
+                    except BaseException:
+                         errors.append(filepath)
+                         progressbar_conversion.set_postfix(file=filepath, refresh=False)
+                         progressbar_conversion.update(os.stat(filepath).st_size)
+                         continue
+                    progressbar_conversion.set_postfix(file=filepath, refresh=False)
+                    progressbar_conversion.update(os.stat(filepath).st_size)
+               elif filepath.endswith('.doc'):  # Сценарий для doc файла
+                   try:
+                       save_as_docx(filepath)
+                   except BaseException:
+                       errors.append(filepath)
+                       progressbar_conversion.set_postfix(file=filepath, refresh=False)
+                       progressbar_conversion.update(os.stat(filepath).st_size)
+                       continue
+                   progressbar_conversion.set_postfix(file=filepath, refresh=False)
+                   progressbar_conversion.update(os.stat(filepath).st_size)
+
+
+# ОСНОВНАЯ ФУНКЦИЯ ПОИСКА, АНАЛИЗА И ВЫВОДА РЕЗУЛЬТАТОВ РАБОТЫ
+# 1) На вход поступает путь дирректории, в которой будет проводится анализ файлов
+# 2) Папки с "_files" в названии пропускаются
+# 3) DOC и MHT предварительно были перезаписаны в docx и html соответственно
+# 4) Обрабатываются все HTML, HTM, DOXC, PPTX и PDF файлы
+# 5) Отчет выводится в виде .CSV файла и папки с текстом
+def search(area):
+    df = pd.DataFrame(columns=['Путь хранения файла в архиве',
+                               'Название файла в архиве',
+                               'Дата создания файла',
+                               'Заголовок',
+                               'Ключевые слова(из meta)',
+                               'Автор',
+                               'Ключевые слова по факту',
+                               'Биграммы',
+                               'Анотация',
+                               'Путь хранения извлеченного текста'])
+
+    row = 0
+
+    # Предварительная обработка общих размеров файлов
+    sizecounter_all = 0
+    for filepath in tqdm(walk_for_analysis(area), unit="files"):
+        try:
+            sizecounter_all += os.stat(filepath).st_size
+        except BaseException:
+            errors_with_name.append(filepath)
+            continue
+
+
+    global progressbar_research
+
+    # Загрузка tqdm со счетчиком размера вместо счетчика файлов
+    with tqdm(total=sizecounter_all,
+              unit='B', unit_scale=True, unit_divisor=1024) as progressbar_research:
+        for filepath in walk_for_analysis(area):
+            if filepath not in errors_with_name:
+                if filepath.endswith('.pdf'):
+                    row += 1
+                    ts = creation_date(filepath)  # Время изменения файла
+                    pdf_data = get_pdf_data(filepath)
+                    filename = os.path.basename(filepath)  # Имя файла
+                    file_name_to_text = index + '\\' + filename[:-4] + '.txt'
+                    open(file_name_to_text, 'w', encoding='utf8').write(pdf_data[6])
+                    df.loc[row] = [filepath, filename, ts, pdf_data[0], pdf_data[1], pdf_data[2], pdf_data[3], pdf_data[4],
+                                   pdf_data[5], file_name_to_text]
+                elif filepath.endswith('.pptx'):
+                    row += 1
+                    ts = creation_date(filepath)  # Время изменения файла
+                    pptx_data = get_pptx_data(filepath)
+                    filename = os.path.basename(filepath)  # Имя файла
+                    file_name_to_text = index + '\\' + filename[:-5] + '.txt'
+                    open(file_name_to_text, 'w', encoding='utf8').write(pptx_data[6])
+                    df.loc[row] = [filepath, filename, ts, pptx_data[0], pptx_data[1], pptx_data[2], pptx_data[3],
+                                   pptx_data[4],
+                                   pptx_data[5], file_name_to_text]
+                elif filepath.endswith('.docx'):
+                    filename = os.path.basename(filepath)  # Имя файла
+                    if filename[:-5] + '.doc' in list_for_mht_doc:
+                        ts = creation_date(filepath[:-5] + '.doc')
+                    else:
+                        ts = creation_date(filepath)
+                    row += 1
+                    try:
+                        doxc_data = get_docx_data(filepath)
+                    except BaseException:
+                        errors_docx.append(filepath)
+                        continue
+                    file_name_to_text = index + '\\' + filename[:-5] + '.txt'
+                    open(file_name_to_text, 'w', encoding='utf8').write(doxc_data[6])
+                    df.loc[row] = [filepath, filename, ts, doxc_data[0], doxc_data[1], doxc_data[2], doxc_data[3],
+                                   doxc_data[4],
+                                   doxc_data[5], file_name_to_text]
+                elif filepath.endswith('.htm'):
+                    ts = creation_date(filepath)
+                    row += 1
+                    name_file = ('file:///' + filepath).replace('\\', '/')
+                    htm_data = get_html_data(name_file, filepath)
+                    if htm_data == 0:
+                        row -= 1
+                        progressbar_research.set_description("ПУСТОЙ ФАЙЛ: ")
+                        progressbar_research.set_postfix(file=filepath, refresh=False)
+                        progressbar_research.update(os.stat(filepath).st_size)
+                        errors_empty_file.append(filepath)
+                        continue
+                    filename = os.path.basename(filepath)  # Имя файла
+                    file_name_to_text = index + '\\' + filename[:-4] + '.txt'
+                    open(file_name_to_text, 'w', encoding='utf8').write(htm_data[6])
+                    df.loc[row] = [filepath, filename, ts, htm_data[0], htm_data[1], htm_data[2], htm_data[3], htm_data[4],
+                                   htm_data[5], file_name_to_text]
+                elif filepath.endswith('.html'):
+                    filename = os.path.basename(filepath)  # Имя файла
+                    if filename[:-5] + '.mht' in list_for_mht_doc:
+                        ts = creation_date(filepath[:-5] + '.mht')
+                    else:
+                        ts = creation_date(filepath)
+                    row += 1
+                    name_file = ('file:///' + filepath).replace('\\', '/')
+                    html_data = get_html_data(name_file, filepath)
+                    if html_data == 0:
+                        row -= 1
+                        progressbar_research.set_description("ПУСТОЙ ФАЙЛ: ")
+                        progressbar_research.set_postfix(file=filepath, refresh=False)
+                        progressbar_research.update(os.stat(filepath).st_size)
+                        errors_empty_file.append(filepath)
+                        continue
+                    file_name_to_text = index + '\\' + filename[:-5] + '.txt'
+                    open(file_name_to_text, 'w', encoding='utf8').write(html_data[6])
+                    df.loc[row] = [filepath, filename, ts, html_data[0], html_data[1], html_data[2], html_data[3],
+                                   html_data[4],
+                                   html_data[5], file_name_to_text]
+
+    df.to_csv('out.csv', sep=';', encoding="utf8")
+    df.to_excel
+
+
+# функция получаящая данные из PDF файда (на вход подается пусть до этого файла)
+def get_pdf_data(path_to_pdf):
+    doc = fitz.open(path_to_pdf)  # Опредение PDF обьекта
+    allUniqueText = []  # список грязного текста, собираемый блоков
+    regex = re.compile(r'[\n]')
+
+    # цикл проходящий по каждой странице заданного документа
+    progressbar_research.set_description("ПОЛУЧЕНИЕ ТЕКСТА PDF: ")
+    for i in range(doc.pageCount):
+        # цикл сбора текста без колонтитулов
+        text_on_page = []
+        Page = doc.loadPage(i)  # загружаем одну страницу
+        list = Page.getTextBlocks()  # Получаем список блоков страницы
+        if len(list) <= 6:  # если блоков на странице меньше 5 анализируем всю страницу
+            for paragraph in list:
+                for part in paragraph[4].split('\n'):
+                    if part not in allUniqueText:
+                        allUniqueText.append(part)
+        elif len(list) > 6:
+            pageHeader = list[:4]  # собираем первые 4 блока
+            for topParagraph in pageHeader:
+                for topPart in topParagraph[4].split('\n'):
+                    if topPart not in allUniqueText:
+                        allUniqueText.append(topPart)
+            for middleParagraph in list[4:-3]:  # собираем текст между 4 первыми и 4 поледними блоками
+                allUniqueText.append(regex.sub(' ', middleParagraph[4]))
+            footer = list[-3:]  # собираем последние 4 блока
+            for bottomParagraph in footer:
+                for bottomPatr in bottomParagraph[4].split('\n'):
+                    if bottomPatr not in allUniqueText:
+                        allUniqueText.append(bottomPatr)
+    progressbar_research.set_postfix(file=path_to_pdf, refresh=False)
+    progressbar_research.update(os.stat(path_to_pdf).st_size * 0.16)
+
+    all_Text = str(' '.join(allUniqueText)) # Собираем весь текст в строку для дальнейшего анализа
+
+    progressbar_research.set_description("ОЧИСТКА ТЕКСТА PDF: ")
+    clean_all_text = clean(all_Text) # Проводится очистка от \r, \n, \t, \x0a, излиних пробелов и прочего мусора
+    progressbar_research.set_postfix(file=path_to_pdf, refresh=False)
+    progressbar_research.update(os.stat(path_to_pdf).st_size * 0.1)
+
+    progressbar_research.set_description("СТОП СЛОВА И СИМВОЛЫ PDF: ")
+    text_without_stop = deletion(clean_all_text) # текст без стоп символов и без стоп слов
+    progressbar_research.set_postfix(file=path_to_pdf, refresh=False)
+    progressbar_research.update(os.stat(path_to_pdf).st_size * 0.1)
+
+    progressbar_research.set_description("ЛЕММАТИЗАЦИЯ PDF: ")
+    lemma_pdf = lemma(text_without_stop) # Получение лемм текста
+    progressbar_research.set_postfix(file=path_to_pdf, refresh=False)
+    progressbar_research.update(os.stat(path_to_pdf).st_size * 0.15)
+
+    progressbar_research.set_description("ПОДСЧЕТ КЛЮЧЕВЫХ СЛОВ И БИГРАММ PDF: ")
+    keywords_in_fact = ohten_words(lemma_pdf) # Получение ключевых слов по факту
+    bigrams_in_fact = digrams(lemma_pdf) # Получение биграмм
+    progressbar_research.set_postfix(file=path_to_pdf, refresh=False)
+    progressbar_research.update(os.stat(path_to_pdf).st_size * 0.1)
+
+    anot = anotation(clean_all_text, lemma_pdf, path_to_pdf) # Получение анотации
+
+    progressbar_research.set_description("ПОЛУЧЕНИЕ META ДАННЫХ PDF: ")
+    title = doc.metadata['title'] # Получение Заголовка
+    if title is None or title == '':
+        title = 'не найдено'
+    keywords = doc.metadata['keywords'] # Получение ключевых слов из meta
+    if keywords is None or keywords == '':
+        keywords = 'не найдено'
+    author = doc.metadata['author'] # Получение автора
+    if author is None or author == '':
+        author = 'не найдено'
+    progressbar_research.set_postfix(file=path_to_pdf, refresh=False)
+    progressbar_research.update(os.stat(path_to_pdf).st_size * 0.04)
+
+    return title, keywords, author, keywords_in_fact, bigrams_in_fact, anot, clean_all_text
+
+
+# функция получаящая данные из PPTX файда (на вход подается пусть до этого файла)
+def get_pptx_data(path_to_pptx):
+    prs = Presentation(path_to_pptx)
+    text_runs = []
+
+    progressbar_research.set_description("ПОЛУЧЕНИЕ ТЕКСТА PPTX: ")
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            for paragraph in shape.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    text_runs.extend(run.text.split())
+    progressbar_research.set_postfix(file=path_to_pptx, refresh=False)
+    progressbar_research.update(os.stat(path_to_pptx).st_size * 0.16)
+
+    all_Text = str(' '.join(text_runs))  # Собираем весь текст в строку для дальнейшего анализа
+
+    progressbar_research.set_description("ОЧИСТКА ТЕКСТА PPTX: ")
+    clean_all_text = clean(all_Text)  # Проводится очистка от \r, \n, \t, \x0a, излиних пробелов и прочего мусора
+    progressbar_research.set_postfix(file=path_to_pptx, refresh=False)
+    progressbar_research.update(os.stat(path_to_pptx).st_size * 0.1)
+
+    progressbar_research.set_description("СТОП СЛОВА И СИМВОЛЫ PPTX: ")
+    text_without_stop = deletion(clean_all_text)  # текст без стоп символов и без стоп слов
+    progressbar_research.set_postfix(file=path_to_pptx, refresh=False)
+    progressbar_research.update(os.stat(path_to_pptx).st_size * 0.1)
+
+    progressbar_research.set_description("ЛЕММАТИЗАЦИЯ PPTX: ")
+    lemma_pptx = lemma(text_without_stop)  # Получение лемм текста
+    progressbar_research.set_postfix(file=path_to_pptx, refresh=False)
+    progressbar_research.update(os.stat(path_to_pptx).st_size * 0.15)
+
+    progressbar_research.set_description("ПОДСЧЕТ КЛЮЧЕВЫХ СЛОВ И БИГРАММ PPTX: ")
+    keywords_in_fact = ohten_words(lemma_pptx)  # Получение ключевых слов по факту
+    bigrams_in_fact = digrams(lemma_pptx)  # Получение биграмм
+    progressbar_research.set_postfix(file=path_to_pptx, refresh=False)
+    progressbar_research.update(os.stat(path_to_pptx).st_size * 0.1)
+
+    anot = anotation(clean_all_text, lemma_pptx, path_to_pptx)  # Получение анотации
+
+    progressbar_research.set_description("ПОЛУЧЕНИЕ META ДАННЫХ PPTX: ")
+    title = prs.core_properties.title  # Получение Заголовка
+    if title is None or title == '':
+        title = 'не найдено'
+    keywords = prs.core_properties.keywords  # Получение ключевых слов из meta
+    if keywords is None or keywords == '':
+        keywords = 'не найдено'
+    author = prs.core_properties.author  # Получение автора
+    if author is None or author == '':
+        author = 'не найдено'
+    progressbar_research.set_postfix(file=path_to_pptx, refresh=False)
+    progressbar_research.update(os.stat(path_to_pptx).st_size * 0.04)
+
+    return title, keywords, author, keywords_in_fact, bigrams_in_fact, anot, clean_all_text
+
+
+# функция получаящая данные из DOXC файда (на вход подается пусть до этого файла)
+def get_docx_data(path_to_doxc):
+    progressbar_research.set_description("ПОЛУЧЕНИЕ ТЕКСТА DOCX: ")
+    doc = docx.Document(path_to_doxc)
+    text = []
+
+    for paragraph in doc.paragraphs:
+        text.extend(paragraph.text.split())
+    progressbar_research.set_postfix(file=path_to_doxc, refresh=False)
+    progressbar_research.update(os.stat(path_to_doxc).st_size * 0.16)
+
+    all_Text = str(' '.join(text)) # Собираем весь текст в строку для дальнейшего анализа
+    progressbar_research.set_description("ОЧИСТКА ТЕКСТА DOCX: ")
+    clean_all_text = clean(all_Text)  # Проводится очистка от \r, \n, \t, \x0a, излиних пробелов и прочего мусора
+    progressbar_research.set_postfix(file=path_to_doxc, refresh=False)
+    progressbar_research.update(os.stat(path_to_doxc).st_size * 0.1)
+
+    progressbar_research.set_description("СТОП СЛОВА И СИМВОЛЫ DOCX: ")
+    text_without_stop = deletion(clean_all_text)  # текст без стоп символов и без стоп слов
+    progressbar_research.set_postfix(file=path_to_doxc, refresh=False)
+    progressbar_research.update(os.stat(path_to_doxc).st_size * 0.1)
+
+    progressbar_research.set_description("ЛЕММАТИЗАЦИЯ DOCX: ")
+    lemma_docx = lemma(text_without_stop)  # Получение лемм текста
+    progressbar_research.set_postfix(file=path_to_doxc, refresh=False)
+    progressbar_research.update(os.stat(path_to_doxc).st_size * 0.15)
+
+    progressbar_research.set_description("ПОДСЧЕТ КЛЮЧЕВЫХ СЛОВ И БИГРАММ DOCX: ")
+    keywords_in_fact = ohten_words(lemma_docx)  # Получение ключевых слов по факту
+    bigrams_in_fact = digrams(lemma_docx)  # Получение биграмм
+    progressbar_research.set_postfix(file=path_to_doxc, refresh=False)
+    progressbar_research.update(os.stat(path_to_doxc).st_size * 0.1)
+
+    progressbar_research.set_description("ПОЛУЧЕНИЕ META ДАННЫХ DOCX: ")
+    progressbar_research.set_postfix(file=path_to_doxc, refresh=False)
+    progressbar_research.update(os.stat(path_to_doxc).st_size * 0.04)
+
+    anot = anotation(clean_all_text, lemma_docx, path_to_doxc)  # Получение анотации
+
+    return 'docx нет meta данных', 'docx нет meta данных', 'docx нет meta данных', keywords_in_fact, bigrams_in_fact, anot, clean_all_text
+
+
+# функция получаящая данные из HTML файда (на вход подается пусть до этого файла)
+def get_html_data(htm, path):
+    progressbar_research.set_description("ПОЛУЧЕНИЕ ТЕКСТА HTML: ")
+    s = requests.Session()
+    s.mount('file://', FileAdapter())
+    try:
+        html = urllib.request.urlopen(htm).read()
+        readable_article = Document(html).summary()
+        text = BeautifulSoup(readable_article, 'html.parser').get_text()
+    except Exception:
+        return 0
+    progressbar_research.set_postfix(file=path, refresh=False)
+    progressbar_research.update(os.stat(path).st_size * 0.16)
+
+    progressbar_research.set_description("ОЧИСТКА ТЕКСТА HTML: ")
+    html_clear = clean(text) # Извлечение текста из HTML
+    progressbar_research.set_postfix(file=path, refresh=False)
+    progressbar_research.update(os.stat(path).st_size * 0.1)
+
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+    except Exception:
+        progressbar_research.set_postfix(file=path, refresh=False)
+        progressbar_research.update(os.stat(path).st_size * 0.74)
+        return 0
+
+    progressbar_research.set_description("СТОП СЛОВА И СИМВОЛЫ HTML: ")
+    text_without_stop = deletion(html_clear) # текст без стоп символов и без стоп слов
+    progressbar_research.set_postfix(file=path, refresh=False)
+    progressbar_research.update(os.stat(path).st_size * 0.1)
+
+    progressbar_research.set_description("ЛЕММАТИЗАЦИЯ HTML: ")
+    lemma_html = lemma(text_without_stop) # Получение лемм текста
+    progressbar_research.set_postfix(file=path, refresh=False)
+    progressbar_research.update(os.stat(path).st_size * 0.15)
+
+    progressbar_research.set_description("ПОДСЧЕТ КЛЮЧЕВЫХ СЛОВ И БИГРАММ HTML: ")
+    keywords_in_fact = ohten_words(lemma_html) # Получение ключевых слов по факту
+    bigrams_in_fact = digrams(lemma_html)
+    progressbar_research.set_postfix(file=path, refresh=False)
+    progressbar_research.update(os.stat(path).st_size * 0.1)
+
+    anot = anotation(html_clear, lemma_html, path)
+
+    progressbar_research.set_description("ПОЛУЧЕНИЕ META ДАННЫХ HTML: ")
+    title = Document(html).short_title()
+    keywords = clean(get_meta_content(soup.findAll('meta', {'name': 'keywords'})))  # Получение заголовка
+    author = clean(get_meta_content(soup.findAll('meta', {'name': 'author'})))  # Получение автора
+    progressbar_research.set_postfix(file=path, refresh=False)
+    progressbar_research.update(os.stat(path).st_size * 0.04)
+
+    return title, keywords, author, keywords_in_fact, bigrams_in_fact, anot, html_clear
+
+
+# Функция получения meta данных из HTML
+def get_meta_content(meta_data_arr):
+    try:
+        if meta_data_arr and len(meta_data_arr) > 0:
+            content_data = [el['content'] for el in meta_data_arr]
+            if content_data and len(content_data) > 0:
+                return content_data[0]
+    except:
+        pass
+    return "не найден"
+
+
+# Проводится очистка от \r, \n, \t, \x0a, излиних пробелов и прочего мусора
+def clean(raw):
+    regex1 = re.compile(r'[\n\r\t]')
+    regex2 = re.compile(r'[�•¶✔|~○™°‼§▬&]')
+    prepre_itog = regex1.sub(" ", raw)
+    pre_itog = regex2.sub("", prepre_itog)
+    itog = unicodedata.normalize("NFKD", pre_itog)
+    return itog
+
+
+# Очистка от стоп символов и стоп слов
+def deletion(text):
+    regex = re.compile(r'[.,;:•¶“”‼§?○™°!▬()*—<>{}|~#$%&/]')
+    stop_symbols = regex.sub(" ", text)
+    clean = []
+    for word in stop_symbols.split():
+        if word not in stopwords.words():
+            clean.append(word)
+    return clean
+
+
+
+# Выявление лемм слов
+def lemma(listing):
+    out = []
+    for word in listing:
+        if len(word) > 3:
+            p = morph.parse(word)[0]
+            out.append(p.normal_form.lower())
+    return out
+
+
+# Частые слова по факту
+def ohten_words(text):
+    data = Counter(text).most_common(11)
+    out = ''
+    for w in data:
+        out += w[0] + ' '
+    return out
+
+
+# Биграммы
+def digrams(text):
+    list_bigram = list(bigrams(text))
+    data = Counter(list_bigram).most_common(10)
+
+    out = ''
+    for w in data:
+        out += w[0][0] + ' ' + w[0][1] + '; '
+    return out[:-2]
+
+
+# Анотация
+# 1) Для каждого слова в тексте определяется его взвешенная масса
+# 2) Для каждого предложения определяется его взвешенная масса (сумма весов слов для предложения)
+# 3) Выводится 5 самых "тяжелых" предложений
+def anotation(big_text, lemma_pool, path):
+    progressbar_research.set_description("ПОЛУЧЕНИЕ АНОТАЦИИ (ПРЕДЛОЖЕНИЯ): ")
+    all_text_by_sen = sentences1(big_text)
+    progressbar_research.set_postfix(file=path, refresh=False)
+    progressbar_research.update(os.stat(path).st_size * 0.05)
+    lemma_1 = set(lemma_pool)
+    puiry = Counter(lemma_pool)
+    maxi = 0
+
+    progressbar_research.set_description("ПОЛУЧЕНИЕ АНОТАЦИИ (ВЕС СЛОВ): ")
+    for i in puiry.items():
+        if i[1] > maxi:
+            maxi = i[1]
+
+    weighted_frequencies = {}
+
+    for word in lemma_1:
+        if len(word) > 3:
+            weighted_frequencies[word] = puiry[word] / maxi
+
+    progressbar_research.set_postfix(file=path, refresh=False)
+    progressbar_research.update(os.stat(path).st_size * 0.15)
+    result = []
+
+    progressbar_research.set_description("ПОЛУЧЕНИЕ АНОТАЦИИ (ВЕС ПРЕДЛОЖЕНИЙ): ")
+    for sen in all_text_by_sen:
+        weight_of_sentence = 0
+        for words in lemma(sen):
+            if words in weighted_frequencies:
+                weight_of_sentence += weighted_frequencies[words]
+        result.append([' '.join(sen), weight_of_sentence])
+
+    progressbar_research.set_postfix(file=path, refresh=False)
+    progressbar_research.update(os.stat(path).st_size * 0.15)
+    output = ''
+
+    if len(all_text_by_sen) >= 10:
+        for i in sorted(result, key=itemgetter(1), reverse=True)[:10]:
+            output += i[0].capitalize() + '. '
+    else:
+        for i in sorted(result, key=itemgetter(1), reverse=True):
+            output += i[0].capitalize() + '. '
+
+    return output
+
+
+# Создания списка, хранящий слова в отдельных предложениях
+def sentences1(article):
+    ending = re.compile(r'[!?]')
+    s = []
+    one_end = ending.sub('.', article)
+    for sentence in one_end.split('. '):
+        one = []
+        for words in sentence.split():
+            one.append(words.lower())
+        s.append(one)
+    return s
+
+
+# Получение времени изменения файла в системе
+def creation_date(path_to_file):
+    path = Path(path_to_file)
+    last_modified = path.stat().st_mtime
+    return datetime.utcfromtimestamp(last_modified).strftime('%Y-%m-%d %H:%M:%S')
+
+
+# ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ ОБСЛУЖИВАЮЩИЕ ОСНОВНЫЕ!!!
+# Поиск в заданном архиве mht и doc файлов
+def walk_mht_doc(folder):
+    """ Движение по всем нужный файлам в директории: doc и mht"""
+    for dirpath, dirnames, filenames in os.walk(folder):
+        for dirname in dirnames:
+            if dirname.endswith('_files'):
+                continue
+        for filename in filenames:
+            if dirpath.find('_files') != -1:
+                continue
+            if filename.endswith('.mht') or filename.endswith('.doc'):
+                list_for_mht_doc.append(filename)
+                yield os.path.abspath(os.path.join(dirpath, filename))
+
+
+# Поиск в заданном архиве docx, htm, html, pptx, pdf файлов
+def walk_for_analysis(all_folder):
+    """ Движение по всем нужный файлам в директории
+     doc, docx, pdf, pptx, htm, html, mht"""
+    for dirpath, dirnames, filenames in os.walk(all_folder):
+        for dirname in dirnames:
+            if dirname.endswith('_files'):
+                continue
+        for filename in filenames:
+            if dirpath.find('_files') != -1:
+                continue
+            if filename.endswith('.htm') or \
+                    filename.endswith('.html') or \
+                    filename.endswith('.docx') or \
+                    filename.endswith('.pptx') or \
+                    filename.endswith('.pdf'):
+                yield os.path.abspath(os.path.join(dirpath, filename))
+
+
+# Преобразование docx(mht) файла в html
+def save_as_html(path_docx, path_html):
+    docx = open(path_docx, 'rb')
+    html = open(path_html, 'wb')
+    document = mammoth.convert_to_html(docx)
+    html.write(document.value.encode('utf8'))
+    html.close()
+    docx.close()
+    os.remove(path_docx)
+
+
+# Преобразование файла в docx расширение
+def save_as_docx(path):
+    # Открыть MS Word
+    word = win32.gencache.EnsureDispatch('Word.Application')
+    doc = word.Documents.Open(path)
+    doc.Activate()
+
+    # Переименовать путь с учетом .docx
+    new_file_abs = os.path.abspath(path)
+    new_file_abs = re.sub(r'\.\w+$', '.docx', new_file_abs)
+
+    # Сохранить и закрыть
+    word.ActiveDocument.SaveAs(
+        new_file_abs, FileFormat=constants.wdFormatXMLDocument
+    )
+    doc.Close(False)
+
+
+#file_conversion(direct)
+search(direct)
+
+print(errors)
+print(errors_with_name)
+print(errors_empty_file)
+print(errors_docx)
